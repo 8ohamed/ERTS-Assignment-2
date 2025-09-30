@@ -1,13 +1,18 @@
 #include "xil_printf.h"
-#include "xtime_l.h"
-#include <string.h>
 #include "xil_io.h"
 #include "xparameters.h"
-#define MATRIX_IP_S00_AXI_SLV_REG0_OFFSET 0
-#define MATRIX_IP_S00_AXI_SLV_REG1_OFFSET 4
-#define MATRIX_IP_S00_AXI_SLV_REG2_OFFSET 8
+#include "xscutimer.h"
+#include <string.h>
+#include "matrix_ip.h"
 
 #define MSIZE 4
+#define TIMER_FREQ 325000000U // 1 second = 325M ticks for Cortex-A9 private timer
+
+
+
+
+
+
 
 typedef union {
     unsigned char comp[MSIZE];
@@ -79,7 +84,6 @@ void multiMatrixSoft(VectorArray A, VectorArray B, VectorArray P) {
 }
 
 
-// 5.3
 void multiMatrixHard(VectorArray A, VectorArray B, VectorArray P) {
     for (int r = 0; r < MSIZE; r++) {
         for (int c = 0; c < MSIZE; c++) {
@@ -93,50 +97,83 @@ void multiMatrixHard(VectorArray A, VectorArray B, VectorArray P) {
     }
 }
 
+
+
+
+
+
+
 int main(void) {
+    XScuTimer Timer;
+    XScuTimer_Config *ConfigPtr;
+    int status;
+
+    // Initialize SCU private timer
+    ConfigPtr = XScuTimer_LookupConfig(XPAR_PS7_SCUTIMER_0_DEVICE_ID);
+    status = XScuTimer_CfgInitialize(&Timer, ConfigPtr, ConfigPtr->BaseAddr);
+
+
     setInputMatrices(aInst, bTInst);
 
     xil_printf("Matrix A:\r\n");
     displayMatrix(aInst);
-
     xil_printf("Matrix B^T:\r\n");
     displayMatrix(bTInst);
 
     char cmdBuffer[16];
 
     while (1) {
+    	//REading command
         xil_printf("CMD:> ");
-
         int idx = 0;
         char ch;
-
-        while ((ch = inbyte()) != '\r' && idx < sizeof(cmdBuffer) - 1) {
-        	xil_printf("%c", ch);
+        while ((ch = inbyte()) != '\r' && idx < sizeof(cmdBuffer)-1) {
+            xil_printf("%c", ch);
             cmdBuffer[idx++] = ch;
         }
-        cmdBuffer[idx] = '\0'; // add 0 to thee end so it terminates the string
+        cmdBuffer[idx] = '\0';
         xil_printf("\r\n");
+        ///////////////////////////////////////////////////////////////////////
 
         if (strcmp(cmdBuffer, "mul") == 0) {
             xil_printf("Computing P = A x B^T\r\n");
 
-            XTime t0, t1;
-            XTime_GetTime(&t0);
-            multiMatrixSoft(aInst, bTInst, pInst);
-            XTime_GetTime(&t1);
+            // ---------------- Soft Multiply Timing ----------------
+            XScuTimer_LoadTimer(&Timer, 0xFFFFFFFF); // max count
+            XScuTimer_Start(&Timer);
 
-            unsigned long long ticks = (unsigned long long)(t1 - t0);
-            xil_printf("multiMatrixSoft took %llu ticks\r\n", ticks);
+            multiMatrixSoft(aInst, bTInst, pInst);
+
+            XScuTimer_Stop(&Timer);
+
+            // Timer counts down, so subtract remaining from start to get elapsed ticks
+            u32 soft_ticks = 0xFFFFFFFF - XScuTimer_GetCounterValue(&Timer);
+
+            // Convert ticks to microseconds (Timer runs at 325 MHz)
+            u32 soft_usec = (soft_ticks * 1000000ULL) / 325000000;
+
+            xil_printf("\r\n");
+            xil_printf("multiMatrixSoft took %u ticks (~%u us)\r\n", soft_ticks, soft_usec);
+            xil_printf("\r\n");
 
             displayMatrix(pInst);
 
-            XTime_GetTime(&t0);
+            // ---------------- Hard Multiply Timing ----------------
+            XScuTimer_LoadTimer(&Timer, 0xFFFFFFFF);
+            XScuTimer_Start(&Timer);
+
             multiMatrixHard(aInst, bTInst, pInst);
-            XTime_GetTime(&t1);
-            xil_printf("Hard: %llu ticks\r\n", (unsigned long long)(t1 - t0));
+
+            XScuTimer_Stop(&Timer);
+
+            u32 hard_ticks = 0xFFFFFFFF - XScuTimer_GetCounterValue(&Timer);
+            u32 hard_usec = (hard_ticks * 1000000ULL) / 325000000;
+
+            xil_printf("multiMatrixHard took %u ticks (~%u us)\r\n", hard_ticks, hard_usec);
+
+
         }
     }
 
     return 0;
 }
-
